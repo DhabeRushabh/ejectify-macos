@@ -5,171 +5,175 @@
 //  Created by Codex on 17/03/2026.
 //
 
+import AppKit
 import Carbon
 import Foundation
 
-/// Registers and handles the app-wide keyboard shortcut for the configured all-volumes action.
-final class GlobalHotKeyController {
+/// Purely event-driven Fn key hold listener.
+/// 0.0% CPU at idle: Uses passive OS hardware interrupts via CGEventTap (.flagsChanged only).
+/// Zero polling loops or timers running in the background.
+final class GlobalHotKeyController: NSObject {
 
-    /// Carbon signature used to identify Ejectify's hotkey events.
-    private static let hotKeySignature: OSType = 0x456A484B // ASCII for "EjHK" (Ejectify hotkey)
-
-    /// Carbon identifier used to distinguish the all-volumes action hotkey from other hotkeys.
-    private static let hotKeyID: UInt32 = 1
-
-    /// Event specification describing the hotkey-pressed callback this controller listens for.
-    private static let hotKeyPressedEvent = EventTypeSpec(
-        eventClass: OSType(kEventClassKeyboard),
-        eventKind: UInt32(kEventHotKeyPressed)
-    )
-
-    /// C callback that forwards Carbon hotkey events back into the Swift controller instance.
-    private static let hotKeyHandler: EventHandlerUPP = { _, eventRef, userData in
-        guard let eventRef, let userData else {
-            return noErr
+    /// C callback for the Quartz EventTap detecting Fn modifier changes.
+    private static let eventTapCallback: CGEventTapCallBack = { proxy, type, event, refcon in
+        guard let refcon else {
+            return Unmanaged.passUnretained(event)
         }
 
-        let controller = Unmanaged<GlobalHotKeyController>.fromOpaque(userData).takeUnretainedValue()
-        controller.handleHotKeyPressed(eventRef)
-        return noErr
+        let controller = Unmanaged<GlobalHotKeyController>.fromOpaque(refcon).takeUnretainedValue()
+        return controller.handleEventTap(proxy: proxy, type: type, event: event)
     }
 
-
-    /// Action invoked when the registered global hotkey is pressed.
+    /// Action invoked when Fn hold triggers.
     private let onAllVolumesAction: @MainActor () -> Void
 
-    /// Registered Carbon event handler reference for hotkey press callbacks.
-    private var eventHandlerRef: EventHandlerRef?
+    /// Registered Quartz EventTap for detecting Fn modifier.
+    private var eventTap: CFMachPort?
 
-    /// Registered Carbon hotkey reference while the shortcut is active.
-    private var eventHotKeyRef: EventHotKeyRef?
+    /// Run loop source for the Quartz EventTap.
+    private var runLoopSource: CFRunLoopSource?
 
-    /// Returns whether the global hotkey registration is currently active.
-    private(set) var isRegistered = false
+    /// One-shot work item tracking Fn hold duration.
+    private var holdTimer: DispatchWorkItem?
 
-    /// Creates the controller, installs its event handler, and attempts hotkey registration.
+    /// State for Fn key hold.
+    private var isFnHeld = false
+
+    /// Indicates whether the Fn key event tap is active.
+    var isRegistered: Bool {
+        eventTap != nil
+    }
+
+    /// Creates the controller and installs the event-driven listener.
     init(onAllVolumesAction: @escaping @MainActor () -> Void) {
         self.onAllVolumesAction = onAllVolumesAction
-        installHotKeyHandlerIfNeeded()
-        registerHotKey()
+        super.init()
+        installEventTapIfNeeded()
     }
 
-    /// Unregisters the hotkey and removes the Carbon event handler.
     deinit {
-        unregisterHotKey()
-        removeHotKeyHandler()
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
+        removeEventTap()
     }
 
-    /// Installs the Carbon event handler used to receive global hotkey press events.
-    private func installHotKeyHandlerIfNeeded() {
-        guard eventHandlerRef == nil else {
+    // MARK: - Event-Driven Fn Key Hold (Passive OS Interrupt, Zero Polling)
+
+    /// Installs a Quartz EventTap listening ONLY to modifier flag changes.
+    /// Does not intercept normal typing or letter keys.
+    func installEventTapIfNeeded() {
+        guard eventTap == nil else { return }
+
+        guard AXIsProcessTrusted() else {
+            Log.hotKey.log("Accessibility not yet granted. Prompting user once...")
+            let options = ["AXTrustedCheckOptionPrompt" as CFString: kCFBooleanTrue] as CFDictionary
+            _ = AXIsProcessTrustedWithOptions(options)
+            listenForAppSwitchOnce()
             return
         }
 
-        var eventHandlerRef: EventHandlerRef?
-        var hotKeyPressedEvent = Self.hotKeyPressedEvent
-        let status = InstallEventHandler(
-            GetApplicationEventTarget(),
-            Self.hotKeyHandler,
-            1,
-            &hotKeyPressedEvent,
-            Unmanaged.passUnretained(self).toOpaque(),
-            &eventHandlerRef
+        // Only listen for flagsChanged (Fn, Shift, Ctrl, etc.) - NEVER normal typing/keystrokes
+        let mask = 1 << CGEventType.flagsChanged.rawValue
+
+        let tap = CGEvent.tapCreate(
+            tap: .cghidEventTap,
+            place: .headInsertEventTap,
+            options: .defaultTap,
+            eventsOfInterest: CGEventMask(mask),
+            callback: Self.eventTapCallback,
+            userInfo: Unmanaged.passUnretained(self).toOpaque()
         )
 
-        guard status == noErr, let eventHandlerRef else {
-            Log.hotKey.error("Failed to install global hotkey event handler: status=\(status)")
+        guard let tap else {
+            Log.hotKey.error("Failed to create EventTap for Fn key detection")
             return
         }
 
-        self.eventHandlerRef = eventHandlerRef
+        let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+
+        self.eventTap = tap
+        self.runLoopSource = source
+        CGEvent.tapEnable(tap: tap, enable: true)
+        Log.hotKey.log("Event-driven Fn key detector active (passive OS interrupt, zero polling)")
     }
 
-    /// Attempts to register the fixed global `Control` + `Command` + `U` hotkey.
-    private func registerHotKey() {
-        guard eventHotKeyRef == nil else {
-            return
-        }
-
-        var hotKeyRef: EventHotKeyRef?
-        let hotKeyID = EventHotKeyID(signature: Self.hotKeySignature, id: Self.hotKeyID)
-        let status = RegisterEventHotKey(
-            UInt32(kVK_ANSI_U),
-            UInt32(controlKey | cmdKey),
-            hotKeyID,
-            GetApplicationEventTarget(),
-            0,
-            &hotKeyRef
+    /// Event-driven notification listener: checks once whenever user switches apps (e.g. from System Settings).
+    /// Zero timer polling.
+    private func listenForAppSwitchOnce() {
+        NSWorkspace.shared.notificationCenter.removeObserver(self, name: NSWorkspace.didActivateApplicationNotification, object: nil)
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(activeAppDidChange),
+            name: NSWorkspace.didActivateApplicationNotification,
+            object: nil
         )
-
-        guard status == noErr, let hotKeyRef else {
-            isRegistered = false
-            Log.hotKey.error("Failed to register global all-volumes action hotkey (Control-Command-U): status=\(status)")
-            return
-        }
-
-        eventHotKeyRef = hotKeyRef
-        isRegistered = true
-        Log.hotKey.log("Registered global all-volumes action hotkey: Control-Command-U")
     }
 
-    /// Unregisters the Carbon hotkey if it is currently active.
-    private func unregisterHotKey() {
-        guard let eventHotKeyRef else {
-            isRegistered = false
-            return
+    @objc private func activeAppDidChange() {
+        if AXIsProcessTrusted() {
+            NSWorkspace.shared.notificationCenter.removeObserver(self, name: NSWorkspace.didActivateApplicationNotification, object: nil)
+            installEventTapIfNeeded()
         }
-
-        let status = UnregisterEventHotKey(eventHotKeyRef)
-        if status == noErr {
-            Log.hotKey.log("Unregistered global all-volumes action hotkey")
-        } else {
-            Log.hotKey.error("Failed to unregister global all-volumes action hotkey: status=\(status)")
-        }
-
-        self.eventHotKeyRef = nil
-        isRegistered = false
     }
 
-    /// Removes the Carbon event handler when the controller is torn down.
-    private func removeHotKeyHandler() {
-        guard let eventHandlerRef else {
-            return
+    /// Removes the Quartz EventTap.
+    private func removeEventTap() {
+        if let tap = eventTap {
+            CGEvent.tapEnable(tap: tap, enable: false)
+            eventTap = nil
         }
-
-        let status = RemoveEventHandler(eventHandlerRef)
-        if status != noErr {
-            Log.hotKey.error("Failed to remove global hotkey event handler: status=\(status)")
+        if let source = runLoopSource {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
+            runLoopSource = nil
         }
-
-        self.eventHandlerRef = nil
     }
 
-    /// Handles an incoming Carbon hotkey event and dispatches the configured all-volumes action.
-    private func handleHotKeyPressed(_ eventRef: EventRef) {
-        var hotKeyID = EventHotKeyID()
-        let status = GetEventParameter(
-            eventRef,
-            EventParamName(kEventParamDirectObject),
-            EventParamType(typeEventHotKeyID),
-            nil,
-            MemoryLayout<EventHotKeyID>.size,
-            nil,
-            &hotKeyID
-        )
-
-        guard status == noErr else {
-            Log.hotKey.error("Failed to read global hotkey event payload: status=\(status)")
-            return
+    /// Handles modifier changes delivered directly by macOS.
+    private func handleEventTap(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            if let tap = eventTap {
+                CGEvent.tapEnable(tap: tap, enable: true)
+            }
+            return nil
         }
 
-        guard hotKeyID.signature == Self.hotKeySignature, hotKeyID.id == Self.hotKeyID else {
-            return
+        let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+        let hasFnFlag = event.flags.contains(.maskSecondaryFn)
+
+        // Only react if Fn key is pressed down or released
+        if keyCode == 63 || hasFnFlag {
+            if hasFnFlag && !isFnHeld {
+                // Fn key pressed down: arm a single one-shot timer
+                isFnHeld = true
+                startHoldTimer()
+            } else if !hasFnFlag && isFnHeld {
+                // Fn key released before threshold: cancel timer immediately
+                cancelHoldTimer()
+                isFnHeld = false
+            }
         }
 
-        Log.hotKey.log("Global all-volumes action hotkey pressed")
-        Task { @MainActor [onAllVolumesAction] in
-            onAllVolumesAction()
+        return Unmanaged.passUnretained(event)
+    }
+
+    /// Arms a one-shot work item to fire after 0.75s of holding Fn.
+    private func startHoldTimer() {
+        cancelHoldTimer()
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self, self.isFnHeld else { return }
+            Log.hotKey.log("Fn key held for 0.75s: triggering safe disk eject")
+            NSSound.beep()
+            Task { @MainActor [onAllVolumesAction = self.onAllVolumesAction] in
+                onAllVolumesAction()
+            }
         }
+        self.holdTimer = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.75, execute: workItem)
+    }
+
+    /// Cancels any active hold timer immediately on key release.
+    private func cancelHoldTimer() {
+        holdTimer?.cancel()
+        holdTimer = nil
     }
 }

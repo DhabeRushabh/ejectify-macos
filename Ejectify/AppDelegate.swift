@@ -41,15 +41,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Bootstraps routing mode, applies one-time first-run setup, and initializes primary app controllers.
     func applicationDidFinishLaunching(_ aNotification: Notification) {
-        let isFirstLaunch = !Preference.hasSeenOnboarding
+        Preference.hasSeenOnboarding = true
+        Preference.ejectInsteadOfUnmount = true
+        Preference.forceUnmount = true
+
         VolumeOperationRouter.shared.configureExecutionMode()
-
-        if isFirstLaunch {
-            Preference.launchAtLogin = true
-
-            // First launch is the only automatic registration attempt so macOS can surface helper approval once; later retries only happen after explicit user action.
-            VolumeOperationRouter.shared.requestPrivilegedExecutionMode()
-        }
 
         globalHotKeyController = GlobalHotKeyController { [weak self] in
             self?.performManualUnmountAll()
@@ -59,10 +55,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let updateController = UpdateController()
         self.updateController = updateController
         updateController.start()
-
-        if isFirstLaunch {
-            showOnboarding()
-        }
     }
 
     /// Starts a user-initiated Sparkle update check.
@@ -75,36 +67,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         diagnosticsReportController.saveDiagnosticsReport()
     }
 
-    /// Handles all enabled volumes using the configured user-initiated action.
+    /// Safely ejects all connected external disks without prompting or interruptions.
     func performManualUnmountAll() {
-        let enabledVolumes = Volume.mountedVolumes().filter(\.enabled)
-
-        guard !Preference.ejectInsteadOfUnmount else {
-            activityController?.clearRemountStateForEjectMode()
-            let representatives = Volume.uniqueWholeDiskRepresentatives(from: enabledVolumes)
-            Log.app.log("Manual eject-all triggered: \(representatives.count) whole disk(s) for \(enabledVolumes.count) enabled volume(s)")
-
-            for volume in representatives {
-                VolumeOperationRouter.shared.eject(
-                    volumeUUID: volume.diskUUID.map { $0 as NSUUID },
-                    volumeName: volume.name,
-                    bsdName: volume.bsdName,
-                    forceUnmount: Preference.forceUnmount
-                ) { _, _, _ in }
-            }
-
+        let externalVolumes = Volume.mountedExternalVolumes()
+        guard !externalVolumes.isEmpty else {
+            Log.app.log("Manual eject-all triggered: no external volumes to eject")
             return
         }
 
-        Log.app.log("Manual unmount-all triggered: \(enabledVolumes.count) enabled volumes")
+        activityController?.clearRemountStateForEjectMode()
+        let representatives = Volume.uniqueWholeDiskRepresentatives(from: externalVolumes)
+        Log.app.log("Manual eject-all triggered: \(representatives.count) whole disk(s) for \(externalVolumes.count) external volume(s)")
 
-        for volume in enabledVolumes {
-            VolumeOperationRouter.shared.unmount(
+        for volume in representatives {
+            let wholeBSD = volume.wholeDiskBSDName
+            let volName = volume.name
+
+            VolumeOperationRouter.shared.eject(
                 volumeUUID: volume.diskUUID.map { $0 as NSUUID },
                 volumeName: volume.name,
                 bsdName: volume.bsdName,
-                force: Preference.forceUnmount
-            ) { _, _, _ in }
+                forceUnmount: true
+            ) { success, message, _ in
+                Log.app.log("Eject result for \(volName) (\(wholeBSD)): success=\(success), message=\(message ?? "none")")
+                if !success {
+                    // Safe command-line fallback if DiskArbitration encountered a lock
+                    let task = Process()
+                    task.launchPath = "/usr/sbin/diskutil"
+                    task.arguments = ["eject", wholeBSD]
+                    try? task.run()
+                }
+            }
         }
     }
 

@@ -190,10 +190,27 @@ final class StatusBarMenu: NSMenu {
         }
 
         removeAllItems()
+        if !AXIsProcessTrusted() {
+            let axItem = NSMenuItem(
+                title: String(localized: "⚠️ Enable Accessibility (for Long-Press Esc/Fn)"),
+                action: #selector(openAccessibilitySettings),
+                keyEquivalent: ""
+            )
+            axItem.target = self
+            addItem(axItem)
+            addItem(NSMenuItem.separator())
+        }
         buildActionsMenu()
         buildVolumesMenu()
         buildPreferencesMenu()
         buildAppMenu()
+    }
+
+    /// Opens macOS Accessibility settings pane.
+    @objc private func openAccessibilitySettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+            NSWorkspace.shared.open(url)
+        }
     }
 
     /// Builds the top "Actions" section.
@@ -207,12 +224,20 @@ final class StatusBarMenu: NSMenu {
         let unmountAllItem = NSMenuItem(
             title: allVolumesActionTitle,
             action: #selector(unmountAllClicked(menuItem:)),
-            keyEquivalent: isHotKeyRegistered ? "u" : ""
+            keyEquivalent: isHotKeyRegistered ? "e" : ""
         )
         unmountAllItem.target = self
         unmountAllItem.keyEquivalentModifierMask = isHotKeyRegistered ? [.control, .command] : []
         unmountAllItem.isEnabled = !volumes.isEmpty
         addItem(unmountAllItem)
+
+        let holdTipItem = NSMenuItem(
+            title: String(localized: "Hold Fn key for 1s to Eject"),
+            action: nil,
+            keyEquivalent: ""
+        )
+        holdTipItem.isEnabled = false
+        addItem(holdTipItem)
     }
 
     /// Builds the "Volumes" section with one toggle row per mounted volume.

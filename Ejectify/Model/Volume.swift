@@ -65,6 +65,28 @@ final class Volume {
         VolumeLogLabelFormatter.label(uuid: diskUUID, bsdName: bsdName)
     }
 
+    /// Returns true if this volume belongs to an iPhone, iPad, iOS device, or developer disk image.
+    var isIPhoneOrIOSDevice: Bool {
+        let lowerName = name.lowercased()
+        let lowerBSD = bsdName.lowercased()
+        let lowerURL = url.path.lowercased()
+        if lowerName.contains("iphone") || lowerName.contains("ipad") || lowerName.contains("ios") ||
+           lowerName.contains("developerdiskimage") || lowerName.contains("apple mobile device") ||
+           lowerBSD.contains("iphone") || lowerURL.contains("developerdiskimage") {
+            return true
+        }
+        return false
+    }
+
+    /// Returns currently mounted external storage volumes, strictly excluding internal drives, disk images, and any iPhone/iOS devices.
+    static func mountedExternalVolumes() -> [Volume] {
+        return mountedVolumes().filter { volume in
+            guard volume.category == .external else { return false }
+            guard !volume.isIPhoneOrIOSDevice else { return false }
+            return true
+        }
+    }
+
     /// Tracks whether this volume should be managed automatically, using a category-based default when no explicit user preference exists.
     var enabled: Bool {
         get {
