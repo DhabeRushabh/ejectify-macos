@@ -9,7 +9,7 @@ import AppKit
 import Carbon
 
 /// Builds and updates the status bar menu for volume actions and preferences.
-final class StatusBarMenu: NSMenu {
+final class StatusBarMenu: NSMenu, NSMenuDelegate {
 
 
     /// Destination URL used by the Help action.
@@ -22,6 +22,7 @@ final class StatusBarMenu: NSMenu {
     required init(coder: NSCoder) {
         volumes = Volume.mountedVolumes()
         super.init(coder: coder)
+        self.delegate = self
         listenForOperationRouterNotifications()
         updateMenu()
         listenForVolumeNotifications()
@@ -31,9 +32,15 @@ final class StatusBarMenu: NSMenu {
     init() {
         volumes = Volume.mountedVolumes()
         super.init(title: "Ejectify")
+        self.delegate = self
         listenForOperationRouterNotifications()
         updateMenu()
         listenForVolumeNotifications()
+    }
+
+    /// Called right before the menu is displayed on screen.
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        updateMenu()
     }
 
     /// Removes registered workspace observers before deallocation.
@@ -183,12 +190,13 @@ final class StatusBarMenu: NSMenu {
     }
 
     /// Rebuilds all top-level menu sections from current app state.
-    private func updateMenu() {
+    func updateMenu() {
         guard Thread.isMainThread else {
             performSelector(onMainThread: #selector(updateMenuFromMainThread), with: nil, waitUntilDone: false)
             return
         }
 
+        volumes = Volume.mountedVolumes()
         removeAllItems()
         let isTrusted = AXIsProcessTrusted()
         if isTrusted {

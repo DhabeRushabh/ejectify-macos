@@ -19,14 +19,16 @@
    - If `Fn` is released before 0.75s, the work item cancels immediately.
    - If held for 0.75s, it triggers whole-disk safe ejection.
    - When no keys are pressed, the thread sleeps in `CFRunLoop` consuming 0.0% CPU.
-2. **Accessibility Permission Discovery**:
+2. **Accessibility Permission Discovery & TCC Persistence**:
    - `CGEventTap` requires Accessibility permission (`kTCCServiceAccessibility`).
-   - If not granted, the app requests it once natively via `AXIsProcessTrustedWithOptions` and listens passively to `NSWorkspace.didActivateApplicationNotification` (no background polling loops) to initialize the event tap the moment the user returns from System Settings.
+   - macOS TCC binds ad-hoc builds to their cdhash; rebuilding changes the hash, making System Settings look toggled ON while `AXIsProcessTrusted()` fails.
+   - Fixed by signing with a stable designated requirement: `=designated => identifier "nl.nielsmouthaan.Ejectify"`.
+   - `StatusBarMenu` conforms to `NSMenuDelegate` (`menuNeedsUpdate`) and `updateMenu()` re-evaluates `AXIsProcessTrusted()` and mounted volumes dynamically so right-click never displays stale startup warnings.
 
 ## Implementation Details
 - `Ejectify/Model/Volume.swift`: Added `isIPhoneOrIOSDevice` filter and `mountedExternalVolumes()`.
 - `Ejectify/Model/Preference.swift`: Defaulted `ejectInsteadOfUnmount = true`, `forceUnmount = true`, `hasSeenOnboarding = true`.
-- `Ejectify/View/StatusBar.swift`: Dynamic visibility (`statusItem.isVisible = !externalVolumes.isEmpty`), 1-tap left-click ejection with visual `⏏ Ejecting...` feedback, right-click menu.
+- `Ejectify/View/StatusBar.swift`: Dynamic visibility (`statusItem.isVisible = !externalVolumes.isEmpty`), 1-tap left-click ejection with visual `⏏ Ejecting...` feedback, dynamic right-click menu refresh.
 - `Ejectify/Controller/GlobalHotKeyController.swift`: Pure event-driven Fn-only modifier hold detector (0.0% CPU).
 - `Ejectify/AppDelegate.swift`: Streamlined startup (no onboarding modal), safe whole-disk eject targeting only external drives with `/usr/sbin/diskutil eject` fallback.
 - Installed Release binary to `/Applications/Ejectify.app`.

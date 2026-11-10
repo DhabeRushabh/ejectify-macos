@@ -90,6 +90,7 @@ final class StatusBar: NSObject {
 
         if event.type == .rightMouseUp || event.modifierFlags.contains(.control) {
             // Right-click or Control-click: show menu options
+            statusMenu.updateMenu()
             statusItem.menu = statusMenu
             sender.performClick(nil)
             DispatchQueue.main.async { [weak self] in
