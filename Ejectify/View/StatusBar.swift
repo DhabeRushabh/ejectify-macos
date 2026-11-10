@@ -85,6 +85,9 @@ final class StatusBar: NSObject {
     @objc private func statusBarButtonClicked(_ sender: NSStatusBarButton) {
         guard let event = NSApp.currentEvent else { return }
 
+        // Attempt event tap installation if permission was recently granted
+        AppDelegate.shared.globalHotKeyController?.installEventTapIfNeeded()
+
         if event.type == .rightMouseUp || event.modifierFlags.contains(.control) {
             // Right-click or Control-click: show menu options
             statusItem.menu = statusMenu

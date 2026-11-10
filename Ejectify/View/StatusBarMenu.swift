@@ -190,9 +190,14 @@ final class StatusBarMenu: NSMenu {
         }
 
         removeAllItems()
-        if !AXIsProcessTrusted() {
+        let isTrusted = AXIsProcessTrusted()
+        if isTrusted {
+            MainActor.assumeIsolated {
+                AppDelegate.shared.globalHotKeyController?.installEventTapIfNeeded()
+            }
+        } else {
             let axItem = NSMenuItem(
-                title: String(localized: "⚠️ Enable Accessibility (for Long-Press Esc/Fn)"),
+                title: String(localized: "⚠️ Enable Accessibility (Remove & Re-add in Settings)"),
                 action: #selector(openAccessibilitySettings),
                 keyEquivalent: ""
             )

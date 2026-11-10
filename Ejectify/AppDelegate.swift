@@ -23,7 +23,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var activityController: ActivityController?
 
     /// Owns global hotkey registration and dispatch for the configured all-volumes action.
-    private var globalHotKeyController: GlobalHotKeyController?
+    var globalHotKeyController: GlobalHotKeyController?
 
     /// Owns Sparkle updater lifecycle and manual update actions.
     private var updateController: UpdateController?
